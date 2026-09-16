@@ -1,0 +1,18 @@
+[Unit]
+Description=Wispr Gemini voice dictation
+# Needs the desktop session's WAYLAND_DISPLAY/DISPLAY and PipeWire, so it
+# runs with the graphical session instead of at bare user-manager startup.
+PartOf=graphical-session.target
+After=graphical-session.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@PROJECT_ROOT@
+EnvironmentFile=@PROJECT_ROOT@/.env
+ExecStart=@WISPR_BIN@ daemon
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
