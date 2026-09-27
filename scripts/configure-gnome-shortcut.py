@@ -31,7 +31,8 @@ def main() -> None:
         raise SystemExit("gsettings is unavailable; configure the shortcut manually")
 
     raw_paths = gsettings("get", SCHEMA, KEY)
-    paths = ast.literal_eval(raw_paths)
+    # An empty list prints as "@as []" (GVariant type annotation).
+    paths = ast.literal_eval(raw_paths.removeprefix("@as "))
     if SHORTCUT_PATH not in paths:
         paths.append(SHORTCUT_PATH)
         gsettings("set", SCHEMA, KEY, repr(paths))
@@ -39,8 +40,8 @@ def main() -> None:
     command = str(Path.home() / ".local/bin/wispr") + " toggle"
     gsettings("set", SHORTCUT_SCHEMA, "name", "Wispr Dictation")
     gsettings("set", SHORTCUT_SCHEMA, "command", command)
-    gsettings("set", SHORTCUT_SCHEMA, "binding", "<Ctrl><Alt>space")
-    print(f"Configured Ctrl+Alt+Space to run: {command}")
+    gsettings("set", SHORTCUT_SCHEMA, "binding", "<Super><Alt>space")
+    print(f"Configured Super+Alt+Space to run: {command}")
 
 
 if __name__ == "__main__":

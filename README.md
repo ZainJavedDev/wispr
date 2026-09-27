@@ -18,10 +18,13 @@ GEMINI_API_KEY=your_key_here
 
 # Optional settings
 WISPR_TRANSCRIPTION_MODE=SMART
-WISPR_LANGUAGE_CODES=en-US
+# restrict detection; stops Urdu coming out as Hindi
+WISPR_LANGUAGE_CODES=en-US,ur-PK
 WISPR_OUTPUT=paste
-WISPR_AUDIO_SOURCE=   # PipeWire/Pulse source name; empty = system default
-WISPR_DEBUG=1        # verbose logs + save recordings (see Debugging)
+# PipeWire/Pulse source name; empty = system default
+WISPR_AUDIO_SOURCE=
+# verbose logs + save recordings (see Debugging)
+WISPR_DEBUG=1
 ```
 
 Do not commit `.env`. It is excluded by this repository's `.gitignore`.
@@ -36,7 +39,7 @@ chmod +x scripts/install-user.sh
 The installer creates a project-local virtual environment, installs the `wispr`
 command in `~/.local/bin`, and starts a user-level systemd service.
 
-On Ubuntu GNOME, configure the default `Ctrl+Alt+Space` shortcut with:
+On Ubuntu GNOME, configure the default `Super+Alt+Space` shortcut with:
 
 ```bash
 ./scripts/configure-gnome-shortcut.py
@@ -47,7 +50,7 @@ Custom Shortcuts** and add:
 
 - Name: `Wispr Dictation`
 - Command: `/home/zain-javed/.local/bin/wispr toggle`
-- Shortcut: `Ctrl+Alt+Space` (or any key you prefer)
+- Shortcut: `Super+Alt+Space` (or any key you prefer)
 
 ## Commands
 
