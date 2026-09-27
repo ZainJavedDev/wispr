@@ -165,6 +165,7 @@ class AudioProcess:
         )
         if stderr:
             log.info("Recorder stderr: %s", stderr)
+        self.process = None
 
     async def error_text(self) -> str:
         if self.process is None or self.process.stderr is None:

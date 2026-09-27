@@ -100,8 +100,13 @@ class GeminiLiveTranscriber:
 
         final_text = ""
         interim_text = ""
+        speaking = False
         audio_finished = asyncio.Event()
 
+        # Record during the connect/setup handshake so the first words aren't lost.
+        # ponytail: audio buffers in the ~64 KiB pipe (~2s); a slower handshake
+        # drops the overflow, add a reader queue if that shows up in the logs.
+        await audio.start()
         try:
             async with websockets.connect(
                 self._uri,
@@ -117,8 +122,6 @@ class GeminiLiveTranscriber:
                 log.info("Gemini setup response: %s", first)
                 if "setupComplete" not in first:
                     raise GeminiTranscriptionError(self._response_error(first))
-
-                await audio.start()
 
                 chunks_sent = 0
 
@@ -167,8 +170,19 @@ class GeminiLiveTranscriber:
                 try:
                     while True:
                         try:
-                            raw = await asyncio.wait_for(websocket.recv(), timeout=0.5)
+                            raw = await asyncio.wait_for(websocket.recv(), timeout=0.3)
                         except TimeoutError:
+                            # Live audio: Gemini is caught up, so once it has gone quiet
+                            # with no speech in progress and no unfinalized text, we're done.
+                            # A file is sent faster than real time, so keep waiting there.
+                            if (
+                                audio_finished.is_set()
+                                and not stop_on_eof
+                                and not speaking
+                                and not interim_text
+                            ):
+                                log.info("Gemini idle after audio ended; finishing")
+                                break
                             if audio_finished.is_set():
                                 now = asyncio.get_running_loop().time()
                                 if finish_deadline is None:
@@ -198,6 +212,10 @@ class GeminiLiveTranscriber:
                         if "error" in response:
                             log.error("Gemini error: %s", response)
                             raise GeminiTranscriptionError(self._response_error(response))
+
+                        activity = _text_at(response, "voiceActivity", "type")
+                        if activity:
+                            speaking = activity == "ACTIVITY_START"
 
                         content = response.get("serverContent", {})
                         incoming_interim = _text_at(
@@ -231,6 +249,8 @@ class GeminiLiveTranscriber:
         except Exception as error:
             log.error("Transcription session failed: %s", self._safe_error(error))
             raise GeminiTranscriptionError(self._safe_error(error)) from error
+        finally:
+            await audio.stop()
 
         log.info("Transcription result: %r", final_text.strip())
         return final_text.strip()
