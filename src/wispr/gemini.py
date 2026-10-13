@@ -20,6 +20,9 @@ log = logging.getLogger(__name__)
 
 TranscriptCallback = Callable[[str], Awaitable[None]]
 
+# After audio ends, finish once Gemini has been quiet this long.
+QUIET_SECONDS = 0.3
+
 
 class GeminiTranscriptionError(RuntimeError):
     pass
@@ -101,12 +104,21 @@ class GeminiLiveTranscriber:
         final_text = ""
         interim_text = ""
         speaking = False
-        audio_finished = asyncio.Event()
+        # True once Gemini has finalized everything heard so far (a completion
+        # with no unfinalized text after it).
+        settled = False
+        loop = asyncio.get_running_loop()
+        audio_ended_at: float | None = None
+        last_message_at = loop.time()
 
-        # Record during the connect/setup handshake so the first words aren't lost.
-        # ponytail: audio buffers in the ~64 KiB pipe (~2s); a slower handshake
-        # drops the overflow, add a reader queue if that shows up in the logs.
+        # Record during the connect/setup handshake so the first words aren't
+        # lost. Audio is queued in memory, so a slow handshake drops nothing.
         await audio.start()
+        captured: asyncio.Queue[bytes | None] = asyncio.Queue()
+        capture = asyncio.create_task(
+            self._capture(audio, captured, stop_event, stop_on_eof)
+        )
+
         try:
             async with websockets.connect(
                 self._uri,
@@ -122,27 +134,16 @@ class GeminiLiveTranscriber:
                 log.info("Gemini setup response: %s", first)
                 if "setupComplete" not in first:
                     raise GeminiTranscriptionError(self._response_error(first))
+                log.info(
+                    "Gemini ready with %.1fs of audio buffered", captured.qsize() * 0.1
+                )
 
                 chunks_sent = 0
 
                 async def send_audio() -> None:
-                    nonlocal chunks_sent
-                    started = asyncio.get_running_loop().time()
+                    nonlocal chunks_sent, audio_ended_at
                     try:
-                        while not stop_event.is_set():
-                            if (
-                                asyncio.get_running_loop().time() - started
-                                >= self.settings.max_duration_seconds
-                            ):
-                                log.warning("Max duration reached, stopping audio")
-                                stop_event.set()
-                                break
-                            chunk = await audio.read_chunk()
-                            if not chunk:
-                                log.info("Audio source returned EOF")
-                                if stop_on_eof:
-                                    stop_event.set()
-                                break
+                        while (chunk := await captured.get()) is not None:
                             payload = {
                                 "realtimeInput": {
                                     "audio": {
@@ -159,48 +160,46 @@ class GeminiLiveTranscriber:
                             chunks_sent,
                             stop_event.is_set(),
                         )
-                        await audio.stop()
                         await websocket.send(
                             json.dumps({"realtimeInput": {"audioStreamEnd": True}})
                         )
-                        audio_finished.set()
+                        audio_ended_at = loop.time()
 
                 sender = asyncio.create_task(send_audio())
-                finish_deadline: float | None = None
                 try:
                     while True:
                         try:
-                            raw = await asyncio.wait_for(websocket.recv(), timeout=0.3)
+                            raw = await asyncio.wait_for(websocket.recv(), timeout=0.1)
                         except TimeoutError:
-                            # Live audio: Gemini is caught up, so once it has gone quiet
-                            # with no speech in progress and no unfinalized text, we're done.
-                            # A file is sent faster than real time, so keep waiting there.
+                            if audio_ended_at is None:
+                                continue
+                            now = loop.time()
+                            # Live audio: once Gemini has caught up and gone quiet, with
+                            # no speech in progress and no unfinalized text, we're done.
+                            # "Caught up" needs a reply after the audio ended unless the
+                            # transcript was already final: audio queued during the
+                            # handshake can reach Gemini in one burst just before the
+                            # end, and Gemini may not have answered it yet. A file is
+                            # sent faster than real time, so keep waiting there.
+                            caught_up = settled or last_message_at > audio_ended_at
+                            quiet_for = now - max(last_message_at, audio_ended_at)
                             if (
-                                audio_finished.is_set()
-                                and not stop_on_eof
+                                not stop_on_eof
+                                and caught_up
                                 and not speaking
                                 and not interim_text
+                                and quiet_for >= QUIET_SECONDS
                             ):
                                 log.info("Gemini idle after audio ended; finishing")
                                 break
-                            if audio_finished.is_set():
-                                now = asyncio.get_running_loop().time()
-                                if finish_deadline is None:
-                                    finish_deadline = (
-                                        now + self.settings.final_timeout_seconds
-                                    )
-                                elif now >= finish_deadline:
-                                    log.info(
-                                        "No final response within %ss after audio ended",
-                                        self.settings.final_timeout_seconds,
-                                    )
-                                    break
+                            if now - audio_ended_at >= self.settings.final_timeout_seconds:
+                                log.info(
+                                    "No final response within %ss after audio ended",
+                                    self.settings.final_timeout_seconds,
+                                )
+                                break
                             continue
-                        if audio_finished.is_set() and finish_deadline is None:
-                            finish_deadline = (
-                                asyncio.get_running_loop().time()
-                                + self.settings.final_timeout_seconds
-                            )
+                        last_message_at = loop.time()
                         log.debug("Gemini message: %s", raw)
                         try:
                             response = json.loads(raw)
@@ -216,6 +215,8 @@ class GeminiLiveTranscriber:
                         activity = _text_at(response, "voiceActivity", "type")
                         if activity:
                             speaking = activity == "ACTIVITY_START"
+                            if speaking:
+                                settled = False
 
                         content = response.get("serverContent", {})
                         incoming_interim = _text_at(
@@ -225,6 +226,7 @@ class GeminiLiveTranscriber:
 
                         if incoming_interim and incoming_interim != interim_text:
                             interim_text = incoming_interim
+                            settled = False
                             if on_interim:
                                 await on_interim(interim_text)
 
@@ -235,11 +237,11 @@ class GeminiLiveTranscriber:
                             if on_final:
                                 await on_final(final_text)
 
-                        if audio_finished.is_set() and (
-                            content.get("turnComplete") or content.get("generationComplete")
-                        ):
-                            log.info("Gemini turn complete")
-                            break
+                        if content.get("turnComplete") or content.get("generationComplete"):
+                            if audio_ended_at is not None:
+                                log.info("Gemini turn complete")
+                                break
+                            settled = not interim_text
                 finally:
                     if not sender.done():
                         stop_event.set()
@@ -250,10 +252,40 @@ class GeminiLiveTranscriber:
             log.error("Transcription session failed: %s", self._safe_error(error))
             raise GeminiTranscriptionError(self._safe_error(error)) from error
         finally:
-            await audio.stop()
+            # Also stops the recorder when connecting to Gemini failed.
+            if not capture.done():
+                stop_event.set()
+            await capture
 
         log.info("Transcription result: %r", final_text.strip())
         return final_text.strip()
+
+    async def _capture(
+        self,
+        audio: AudioProcess,
+        captured: asyncio.Queue[bytes | None],
+        stop_event: asyncio.Event,
+        stop_on_eof: bool,
+    ) -> None:
+        """Read audio into memory until stopped; None marks the end."""
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        try:
+            while not stop_event.is_set():
+                if loop.time() - started >= self.settings.max_duration_seconds:
+                    log.warning("Max duration reached, stopping audio")
+                    stop_event.set()
+                    break
+                chunk = await audio.read_chunk()
+                if not chunk:
+                    log.info("Audio source returned EOF")
+                    if stop_on_eof:
+                        stop_event.set()
+                    break
+                captured.put_nowait(chunk)
+        finally:
+            await audio.stop()
+            captured.put_nowait(None)
 
     @staticmethod
     def _response_error(response: dict[str, Any]) -> str:

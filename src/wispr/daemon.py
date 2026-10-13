@@ -142,11 +142,10 @@ class WisprDaemon:
             record_path = self.settings.recordings_dir / name
 
         try:
-            log.info(
-                "Session starting; WISPR_AUDIO_SOURCE=%s, system default source=%s",
-                self.settings.audio_source,
-                default_audio_source(),
-            )
+            log.info("Session starting; WISPR_AUDIO_SOURCE=%s", self.settings.audio_source)
+            if self.settings.debug:
+                # Querying the default device is slow; don't delay recording for it.
+                log.debug("System default source: %s", default_audio_source())
             transcriber = GeminiLiveTranscriber(self.settings)
             audio = AudioProcess(
                 microphone_command(self.settings.audio_source), record_path
