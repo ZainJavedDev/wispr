@@ -16,6 +16,7 @@ class FakeAudio:
         self.chunks = chunks
         self.read = 0
         self.started_at: float | None = None
+        self.ended_at: float | None = None
         self.stopped = False
 
     async def start(self) -> None:
@@ -24,6 +25,7 @@ class FakeAudio:
     async def read_chunk(self, size: int = 3200) -> bytes:
         await asyncio.sleep(0.02)
         if not self.chunks:
+            self.ended_at = self.ended_at or time.monotonic()
             return b""
         self.chunks -= 1
         self.read += 1
@@ -126,6 +128,23 @@ class FinishTests(unittest.TestCase):
             ),
         )
         self.assertEqual(text, "short")
+
+    def test_silent_live_dictation_finishes_quickly(self) -> None:
+        # Gemini says nothing about silence; after streaming live for a while,
+        # that silence is the answer rather than a reason to wait 3s more.
+        settings = Settings(api_key="test", final_timeout_seconds=3)
+        socket = FakeWebSocket([{"setupComplete": {}}])
+        audio = FakeAudio(chunks=60)  # 1.2s of real-time audio
+
+        async def run() -> str:
+            with patch("websockets.connect", return_value=socket):
+                return await GeminiLiveTranscriber(settings).transcribe(
+                    audio, asyncio.Event()
+                )
+
+        text = asyncio.run(run())
+        self.assertEqual(text, "")
+        self.assertLess(time.monotonic() - audio.ended_at, 1.5)
 
     def test_connection_failure_stops_the_recorder(self) -> None:
         audio = FakeAudio(chunks=10_000)

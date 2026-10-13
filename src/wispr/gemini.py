@@ -22,6 +22,8 @@ TranscriptCallback = Callable[[str], Awaitable[None]]
 
 # After audio ends, finish once Gemini has been quiet this long.
 QUIET_SECONDS = 0.3
+# Real-time streaming this long lets Gemini react to anything it was sent.
+LIVE_SECONDS = 1.0
 
 
 class GeminiTranscriptionError(RuntimeError):
@@ -109,6 +111,8 @@ class GeminiLiveTranscriber:
         settled = False
         loop = asyncio.get_running_loop()
         audio_ended_at: float | None = None
+        # When the handshake backlog was sent and audio began flowing in real time.
+        live_since: float | None = None
         last_message_at = loop.time()
 
         # Record during the connect/setup handshake so the first words aren't
@@ -141,7 +145,7 @@ class GeminiLiveTranscriber:
                 chunks_sent = 0
 
                 async def send_audio() -> None:
-                    nonlocal chunks_sent, audio_ended_at
+                    nonlocal chunks_sent, audio_ended_at, live_since
                     try:
                         while (chunk := await captured.get()) is not None:
                             payload = {
@@ -154,6 +158,9 @@ class GeminiLiveTranscriber:
                             }
                             await websocket.send(json.dumps(payload))
                             chunks_sent += 1
+                            if live_since is None and captured.empty():
+                                live_since = loop.time()
+                                log.info("Buffered audio sent; streaming live")
                     finally:
                         log.info(
                             "Audio sending finished: %s chunks sent (stop requested: %s)",
@@ -176,12 +183,21 @@ class GeminiLiveTranscriber:
                             now = loop.time()
                             # Live audio: once Gemini has caught up and gone quiet, with
                             # no speech in progress and no unfinalized text, we're done.
-                            # "Caught up" needs a reply after the audio ended unless the
-                            # transcript was already final: audio queued during the
-                            # handshake can reach Gemini in one burst just before the
-                            # end, and Gemini may not have answered it yet. A file is
-                            # sent faster than real time, so keep waiting there.
-                            caught_up = settled or last_message_at > audio_ended_at
+                            # Audio queued during the handshake reaches Gemini in one
+                            # burst; if that happened just before the end, Gemini may
+                            # not have answered it yet. So Gemini counts as caught up
+                            # only if the transcript was already final, it replied
+                            # after the audio ended, or audio had been streaming live
+                            # long enough for it to react. A file is sent faster than
+                            # real time, so keep waiting there.
+                            caught_up = (
+                                settled
+                                or last_message_at > audio_ended_at
+                                or (
+                                    live_since is not None
+                                    and audio_ended_at - live_since >= LIVE_SECONDS
+                                )
+                            )
                             quiet_for = now - max(last_message_at, audio_ended_at)
                             if (
                                 not stop_on_eof
