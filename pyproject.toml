@@ -5,16 +5,21 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "wispr-gemini"
 version = "0.1.0"
-description = "System-wide Gemini Live voice dictation for Linux"
+description = "System-wide Gemini Live voice dictation for Linux and Windows"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
 dependencies = [
   "websockets>=14,<17",
+  "sounddevice>=0.4.6; sys_platform == 'win32'",
 ]
 
 [project.scripts]
 wispr = "wispr.cli:main"
+
+[project.gui-scripts]
+# Windowless launcher used by the Windows logon task.
+wisprw = "wispr.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

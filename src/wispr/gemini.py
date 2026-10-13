@@ -7,7 +7,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .audio import AudioProcess
+from .audio import AudioSource
 from .config import Settings
 
 
@@ -94,7 +94,7 @@ class GeminiLiveTranscriber:
 
     async def transcribe(
         self,
-        audio: AudioProcess,
+        audio: AudioSource,
         stop_event: asyncio.Event,
         *,
         stop_on_eof: bool = False,
@@ -278,7 +278,7 @@ class GeminiLiveTranscriber:
 
     async def _capture(
         self,
-        audio: AudioProcess,
+        audio: AudioSource,
         captured: asyncio.Queue[bytes | None],
         stop_event: asyncio.Event,
         stop_on_eof: bool,
